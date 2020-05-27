@@ -1,0 +1,46 @@
+0. Start the redis server & spawn workers
+0a. Start callback worker that posts all send transactions to nano_callback channel
+
+1. Subscribe to payment_request (PROTOBUF - PaymentRequest)
+
+2. On message, check for [destination account or payment hash] and amount
+
+3. If all data is received, respond with payment_ack (PROTOBUF PaymentAck)
+3a. If missing validator, respond with error (PROTOBUF PaymentAck)
+3b. If missing amount, respond with error (PROTOBUF PaymentAck)
+3c. If correct, start 5 minute timer
+
+4. If a destination address validator is received, queue address_validation to worker (Enqueue on Redis)
+4a. If a block hash validator is received, queue block_validation to worker (Enqueue on Redis)
+
+**address_validation**
+5. Retrieve the block hash of the previous 5 transactions and store in redis
+            (1. RPC action=pending, include_active=true, account=destination_account - record any pending blocks to redis
+            2. RPC action=account_history, account=destination_account, count=5 - record all blocks to redis)
+
+5a. Monitor callback for SEND blocks with contents -> link_as_account = destination account
+            Subscribe to nano_callback - on message check for account - if found compare to recorded blocks
+
+5b. Every 5 seconds submit accounts_pending with include_active = true and compare blocks returned to blocks
+            (1. RPC action=pending, include_active=true, account=destination_account - for each block submit to block_confirm
+            2. RPC action=block_confirm, hash=pending_block)
+
+5c. If a new block is identified by the callback, submit to block_confirm for missed blocks due to bootstrapping
+            RPC action=block_confirm, hash=identified_block
+
+5d. Every 1 second poll accounts_pending with include_active = false.  Once the hash is in this, voting has ended.
+            RPC action=pending, account=destination_account
+
+5e. Call confirmation_history for the hash.  If count != 0, block is 100% confirmed & call block_validation.
+            RPC action=confirmation_history, hash=identified_block - int(confirmation_stats->count) > 0 = confirmed
+
+**block_validation**
+6. Call confirmation_history for the hash.  If count != 0, block is confirmed
+            RPC action=confirmation_history, hash=identified_block - int(confirmation_stats->count) > 0 = confirmed
+
+7. For the confirmed block hash, check amount vs. expected amount.
+7a. If amount is over expected, return error (PROTOBUF - Payment)
+7b. If amount is under expected, return error and prompt for remaining payment (PROTOBUF - Payment)
+7c. If amount = expected, return confirmation (PROTOBUF - Payment)
+
+8. If time_elapsed > 5 minutes, return error (PROTOBUF - Payment)
